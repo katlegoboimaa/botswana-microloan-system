@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api, getToken, money } from './api';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 const roles = ['CLERK','MANAGER','ADMIN','MANAGEMENT'];
 const blankClient = { firstName:'', lastName:'', nationalId:'', phone:'', email:'', address:'', employment:'', notes:'' };
@@ -136,7 +138,15 @@ export default function App() {
         <div className="table-wrap"><table><thead><tr><th>Loan / client</th><th>Status</th><th>Principal</th><th>Initial interest</th><th>Charges</th><th>Paid</th><th>Outstanding</th><th>Due date</th><th>Actions</th></tr></thead><tbody>{filteredLoans.map(l=><tr key={l._id}><td><b>{l.loanNumber}</b><small className="table-sub">{l.client?.firstName} {l.client?.lastName}</small></td><td><Status value={l.status}/></td><td>{money(l.principalBWP)}</td><td>{money(l.interestBWP)}</td><td>{money(l.chargesTotalBWP)}</td><td>{money(l.paymentsTotalBWP)}</td><td><b>{money(l.outstandingBWP)}</b></td><td>{new Date(l.dueDate).toLocaleDateString()}</td><td className="actions">{canDecide&&l.status==='PENDING'&&<><button className="mini success-btn" onClick={()=>decision(l._id,'APPROVED')}>Approve</button><button className="mini danger-btn" onClick={()=>decision(l._id,'REJECTED')}>Reject</button></>}{canDecide&&l.status==='APPROVED'&&<button className="mini primary" onClick={()=>disburse(l._id)}>Disburse</button>}{canCapture&&l.status==='DISBURSED'&&<button className="mini secondary" onClick={()=>{setRepayForm({...repayForm,loanId:l._id});setTab('repayments')}}>Repay</button>}</td></tr>)}</tbody></table>{filteredLoans.length===0&&<Empty text="No loans match your search."/>}</div>
       </section>}
       {tab==='repayments' && <section className="panel narrow-panel"><h3>Record a repayment</h3><p className="muted">A receipt is generated after a successful payment record.</p><form className="stack" onSubmit={repayment}><label>Loan<select value={repayForm.loanId} onChange={e=>setRepayForm({...repayForm,loanId:e.target.value})} required><option value="">Select an active loan</option>{loans.filter(l=>l.status==='DISBURSED'&&l.outstandingBWP>0).map(l=><option key={l._id} value={l._id}>{l.loanNumber} — {l.client?.firstName} {l.client?.lastName} — due {money(l.outstandingBWP)}</option>)}</select></label><Field label="Amount received (BWP)" type="number" min="0.01" step="0.01" value={repayForm.amount} set={v=>setRepayForm({...repayForm,amount:v})} required/><label>Payment method<select value={repayForm.method} onChange={e=>setRepayForm({...repayForm,method:e.target.value})}><option value="CASH">Cash</option><option value="BANK_TRANSFER">Bank transfer</option><option value="MOBILE_MONEY">Mobile money</option><option value="OTHER">Other</option></select></label><Field label="Transaction reference (optional)" value={repayForm.reference} set={v=>setRepayForm({...repayForm,reference:v})}/><button className="primary">Record payment & generate receipt</button></form>{receipt&&<div className="receipt" id="receipt"><div className="receipt-top"><div className="brand-mark">ML</div><div><b>PAYMENT RECEIPT</b><small>Micro-Lending Management</small></div><Status value="PAID"/></div><h2>{receipt.receiptNumber}</h2><p>Received: {new Date(receipt.receivedAt).toLocaleString()}</p><div className="receipt-line"><span>Loan number</span><b>{receipt.loanNumber}</b></div><div className="receipt-line"><span>Amount received</span><b>{money(receipt.amountBWP)}</b></div><div className="receipt-line"><span>Method</span><b>{receipt.method.replace('_',' ')}</b></div><div className="receipt-line"><span>Reference</span><b>{receipt.reference||'—'}</b></div><hr/><p className="muted">Payment allocation</p><div className="receipt-line"><span>Overdue charges</span><span>{money(receipt.allocated.charges)}</span></div><div className="receipt-line"><span>Initial interest</span><span>{money(receipt.allocated.interest)}</span></div><div className="receipt-line"><span>Principal</span><span>{money(receipt.allocated.principal)}</span></div><div className="receipt-line total"><span>Remaining balance</span><b>{money(receipt.outstandingBWP)}</b></div><button className="primary wide no-print" onClick={()=>window.print()}>Print receipt</button></div>}</section>}
-      {tab==='reports' && <><section className="stats-grid">{summary&&<><Stat label="Clients" value={summary.clients}/><Stat label="Capital disbursed" value={money(summary.capitalDisbursedBWP)}/><Stat label="Payments collected" value={money(summary.paymentsCollectedBWP)}/><Stat label="Outstanding balance" value={money(summary.outstandingBWP)}/><Stat label="Overdue loans" value={summary.overdueLoans}/><Stat label="Pending applications" value={summary.pendingApplications}/></>}</section><section className="panel"><div className="section-head"><div><h3>Loan portfolio report</h3><p>Current portfolio status, due dates, payments and balances.</p></div><button className="secondary" onClick={()=>downloadCSV(loans)}>Export CSV</button></div><div className="table-wrap"><table><thead><tr><th>Loan</th><th>Client</th><th>Status</th><th>Principal</th><th>Interest</th><th>Charges</th><th>Paid</th><th>Outstanding</th><th>Due date</th></tr></thead><tbody>{loans.map(l=><tr key={l._id}><td>{l.loanNumber}</td><td>{l.client?.firstName} {l.client?.lastName}</td><td><Status value={l.status}/></td><td>{money(l.principalBWP)}</td><td>{money(l.interestBWP)}</td><td>{money(l.chargesTotalBWP)}</td><td>{money(l.paymentsTotalBWP)}</td><td>{money(l.outstandingBWP)}</td><td>{new Date(l.dueDate).toLocaleDateString()}</td></tr>)}</tbody></table></div></section></>}
+      {tab==='reports' && <><section className="stats-grid">{summary&&<><Stat label="Clients" value={summary.clients}/><Stat label="Capital disbursed" value={money(summary.capitalDisbursedBWP)}/><Stat label="Payments collected" value={money(summary.paymentsCollectedBWP)}/><Stat label="Outstanding balance" value={money(summary.outstandingBWP)}/><Stat label="Overdue loans" value={summary.overdueLoans}/><Stat label="Pending applications" value={summary.pendingApplications}/></>}</section><section className="panel"><div className="section-head"><div><h3>Loan portfolio report</h3><p>Current portfolio status, due dates, payments and balances.</p></div><div className="top-actions">
+  <button className="secondary" onClick={()=>downloadCSV(loans)}>
+    Export CSV
+  </button>
+
+  <button className="primary" onClick={()=>downloadPDF(loans, summary)}>
+    Export PDF
+  </button>
+</div></div><div className="table-wrap"><table><thead><tr><th>Loan</th><th>Client</th><th>Status</th><th>Principal</th><th>Interest</th><th>Charges</th><th>Paid</th><th>Outstanding</th><th>Due date</th></tr></thead><tbody>{loans.map(l=><tr key={l._id}><td>{l.loanNumber}</td><td>{l.client?.firstName} {l.client?.lastName}</td><td><Status value={l.status}/></td><td>{money(l.principalBWP)}</td><td>{money(l.interestBWP)}</td><td>{money(l.chargesTotalBWP)}</td><td>{money(l.paymentsTotalBWP)}</td><td>{money(l.outstandingBWP)}</td><td>{new Date(l.dueDate).toLocaleDateString()}</td></tr>)}</tbody></table></div></section></>}
       {tab==='staff' && <section className="panel"><div className="section-head"><div><h3>Staff accounts</h3><p>IT administrator only. Temporary passwords must be changed on first sign-in.</p></div></div><form className="form-grid" onSubmit={createStaff}><h4 className="full">Create staff account</h4><Field label="Full name" value={staffForm.name} set={v=>setStaffForm({...staffForm,name:v})} required/><Field label="Email" type="email" value={staffForm.email} set={v=>setStaffForm({...staffForm,email:v})} required/><Field label="Temporary password (12+ chars)" value={staffForm.password} set={v=>setStaffForm({...staffForm,password:v})} required/><label>Role<select value={staffForm.role} onChange={e=>setStaffForm({...staffForm,role:e.target.value})}>{roles.map(r=><option key={r}>{r}</option>)}</select></label><div className="full"><button className="primary">Create account</button></div></form><div className="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead><tbody>{staff.map(s=><tr key={s._id}><td>{s.name}</td><td>{s.email}</td><td><select value={s.role} onChange={e=>updateStaff(s,{role:e.target.value})} disabled={s._id===user.id}>{roles.map(r=><option key={r}>{r}</option>)}</select></td><td><Status value={s.active?'ACTIVE':'INACTIVE'}/></td><td><button className="text-button" onClick={()=>updateStaff(s,{active:!s.active})}>{s.active?'Deactivate':'Activate'}</button><button className="text-button" onClick={()=>{const p=window.prompt('Enter a temporary password of at least 12 characters');if(p)updateStaff(s,{password:p})}}>Reset password</button></td></tr>)}</tbody></table></div></section>}
       {tab==='audit' && <section className="panel"><div className="section-head"><div><h3>Audit trail</h3><p>Recent security and financial events. Entries are append-only through the application.</p></div></div><div className="table-wrap"><table><thead><tr><th>Date/time</th><th>Actor</th><th>Role</th><th>Action</th><th>Record</th><th>Details</th></tr></thead><tbody>{audit.map(a=><tr key={a._id}><td>{new Date(a.createdAt).toLocaleString()}</td><td>{a.actorName||a.actor?.name||'System'}</td><td>{a.actorRole||a.actor?.role}</td><td><b>{a.action}</b></td><td>{a.entityType} {a.entityId}</td><td><code>{JSON.stringify(a.details||{})}</code></td></tr>)}</tbody></table>{audit.length===0&&<Empty text="No audit events yet."/>}</div></section>}
       {clientEdit && <div className="modal-backdrop"><form className="modal panel" onSubmit={saveClientEdit}><div className="section-head"><h3>Edit client profile</h3><button type="button" className="icon-button" onClick={()=>setClientEdit(null)}>×</button></div><div className="form-grid">{['firstName','lastName','nationalId','phone','email','address','employment','notes'].map(k=><label key={k}>{({firstName:'First name',lastName:'Last name',nationalId:'National ID',phone:'Phone',email:'Email',address:'Address',employment:'Employment',notes:'Notes'})[k]}<input value={clientEdit[k]||''} onChange={e=>setClientEdit({...clientEdit,[k]:e.target.value})}/></label>)}</div><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setClientEdit(null)}>Cancel</button><button className="primary">Save changes</button></div></form></div>}
@@ -166,4 +176,156 @@ function downloadCSV(loans) {
   const csv = [headers,...rows].map(row=>row.map(v=>`"${String(v??'').replaceAll('"','""')}"`).join(',')).join('\r\n');
   const blob = new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url = URL.createObjectURL(blob);
   const a = document.createElement('a'); a.href=url; a.download='loan-portfolio-report.csv'; a.click(); URL.revokeObjectURL(url);
+}
+function downloadPDF(loans, summary) {
+  const doc = new jsPDF({
+    orientation: 'landscape',
+    unit: 'mm',
+    format: 'a4'
+  });
+
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+
+  const generatedDate = new Date().toLocaleString('en-GB');
+
+  // Brand header
+  doc.setFillColor(20, 38, 59);
+  doc.rect(0, 0, pageWidth, 38, 'F');
+
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(22);
+  doc.setFont('helvetica', 'bold');
+  doc.text('MicroLend', 14, 17);
+
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  doc.text('BOTSWANA | MICRO-LENDING MANAGEMENT', 14, 25);
+
+  doc.setFontSize(16);
+  doc.setFont('helvetica', 'bold');
+  doc.text('LOAN PORTFOLIO REPORT', pageWidth - 14, 17, {
+    align: 'right'
+  });
+
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'normal');
+  doc.text(`Generated: ${generatedDate}`, pageWidth - 14, 25, {
+    align: 'right'
+  });
+
+  // Summary section
+  doc.setTextColor(30, 41, 59);
+  doc.setFontSize(13);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Portfolio Summary', 14, 49);
+
+  const summaryItems = [
+    ['Registered clients', summary?.clients ?? 0],
+    ['Capital disbursed', money(summary?.capitalDisbursedBWP ?? 0)],
+    ['Payments collected', money(summary?.paymentsCollectedBWP ?? 0)],
+    ['Outstanding balance', money(summary?.outstandingBWP ?? 0)],
+    ['Overdue loans', summary?.overdueLoans ?? 0],
+    ['Pending applications', summary?.pendingApplications ?? 0]
+  ];
+
+  const cardGap = 4;
+  const cardWidth = (pageWidth - 28 - cardGap * 5) / 6;
+  const cardY = 55;
+
+  summaryItems.forEach((item, index) => {
+    const x = 14 + index * (cardWidth + cardGap);
+
+    doc.setFillColor(241, 245, 249);
+    doc.roundedRect(x, cardY, cardWidth, 20, 2, 2, 'F');
+
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(7);
+    doc.setFont('helvetica', 'normal');
+    doc.text(String(item[0]), x + 3, cardY + 7);
+
+    doc.setTextColor(20, 38, 59);
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.text(String(item[1]), x + 3, cardY + 15, {
+      maxWidth: cardWidth - 6
+    });
+  });
+
+  // Loan table
+  const tableRows = loans.map(loan => [
+    loan.loanNumber || '',
+    `${loan.client?.firstName || ''} ${loan.client?.lastName || ''}`.trim(),
+    loan.status || '',
+    money(loan.principalBWP ?? 0),
+    money(loan.interestBWP ?? 0),
+    money(loan.chargesTotalBWP ?? 0),
+    money(loan.paymentsTotalBWP ?? 0),
+    money(loan.outstandingBWP ?? 0),
+    loan.dueDate
+      ? new Date(loan.dueDate).toLocaleDateString('en-GB')
+      : ''
+  ]);
+
+  autoTable(doc, {
+    startY: 83,
+    head: [[
+      'Loan Number',
+      'Client',
+      'Status',
+      'Principal',
+      'Interest',
+      'Charges',
+      'Paid',
+      'Outstanding',
+      'Due Date'
+    ]],
+    body: tableRows,
+    theme: 'grid',
+    margin: {
+      left: 14,
+      right: 14,
+      bottom: 18
+    },
+    styles: {
+      font: 'helvetica',
+      fontSize: 8,
+      cellPadding: 3,
+      textColor: [51, 65, 85],
+      lineColor: [226, 232, 240],
+      lineWidth: 0.2
+    },
+    headStyles: {
+      fillColor: [20, 38, 59],
+      textColor: [255, 255, 255],
+      fontStyle: 'bold'
+    },
+    alternateRowStyles: {
+      fillColor: [248, 250, 252]
+    },
+    columnStyles: {
+      0: { cellWidth: 25 },
+      1: { cellWidth: 35 },
+      2: { cellWidth: 24 }
+    },
+    didDrawPage: function () {
+      doc.setFontSize(8);
+      doc.setTextColor(120, 120, 120);
+
+      doc.text(
+        'MicroLend | Confidential financial report | Botswana',
+        14,
+        pageHeight - 8
+      );
+
+      doc.text(
+        `Page ${doc.internal.getNumberOfPages()}`,
+        pageWidth - 14,
+        pageHeight - 8,
+        { align: 'right' }
+      );
+    }
+  });
+
+  doc.save('MicroLend-Loan-Portfolio-Report.pdf');
 }
