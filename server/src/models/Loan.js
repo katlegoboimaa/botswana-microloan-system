@@ -7,6 +7,9 @@ const loanSchema = new mongoose.Schema({
   interest: { type: Number, required: true }, // thebe
   amountDueAtStart: { type: Number, required: true }, // principal + initial interest
   dueDate: { type: Date, required: true },
+  originalDisbursementDate: { type: Date, default: null },
+  isHistorical: { type: Boolean, default: false },
+  originalLoanNumber: { type: String, default: '' },
   purpose: { type: String, required: true },
   status: { type: String, enum: ['PENDING','APPROVED','REJECTED','DISBURSED','SETTLED'], default: 'PENDING' },
   decisionNote: { type: String, default: '' },

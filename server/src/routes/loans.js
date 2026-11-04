@@ -115,6 +115,277 @@ router.get('/:id/payments', async (req, res) => {
 });
 
 // Manual trigger makes overdue assessment testable without relying on a background scheduler.
+
+// Import a historical loan with its original repayments.
+// Historical charges and repayments are processed chronologically.
+router.post('/historical', allowRoles('MANAGER', 'ADMIN'), async (req, res) => {
+  const {
+    clientId,
+    principal,
+    interestRate = 25,
+    dueDate,
+    disbursedAt,
+    purpose,
+    originalLoanNumber = '',
+    payments = []
+  } = req.body;
+
+  if (!clientId || !principal || !dueDate || !disbursedAt || !purpose) {
+    return res.status(400).json({
+      message: 'Client, principal, due date, original disbursement date and purpose are required'
+    });
+  }
+
+  if (!Array.isArray(payments)) {
+    return res.status(400).json({ message: 'Payments must be an array' });
+  }
+
+  const client = await Client.findById(clientId);
+  if (!client) return res.status(404).json({ message: 'Client not found' });
+
+  const principalThebe = toThebe(principal);
+  const rate = Number(interestRate);
+  const due = new Date(dueDate);
+  const disbursement = new Date(disbursedAt);
+  const now = new Date();
+
+  if (!Number.isFinite(principalThebe) || principalThebe <= 0) {
+    return res.status(400).json({ message: 'Principal must be greater than zero' });
+  }
+
+  if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+    return res.status(400).json({ message: 'Interest rate must be between 0 and 100 percent' });
+  }
+
+  if (
+    Number.isNaN(due.getTime()) ||
+    Number.isNaN(disbursement.getTime()) ||
+    due <= disbursement ||
+    disbursement > now
+  ) {
+    return res.status(400).json({ message: 'Enter valid historical disbursement and due dates' });
+  }
+
+  const interest = Math.round(principalThebe * rate / 100);
+  const amountDueAtStart = principalThebe + interest;
+
+  // Validate and prepare historical repayments.
+  const preparedPayments = [];
+
+  for (const p of payments) {
+    const amount = toThebe(p.amount);
+    const receivedAt = new Date(p.receivedAt);
+
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      Number.isNaN(receivedAt.getTime()) ||
+      receivedAt < disbursement ||
+      receivedAt > now
+    ) {
+      return res.status(400).json({
+        message: 'Every historical payment needs a valid amount and date between disbursement and today'
+      });
+    }
+
+    if (!['CASH', 'BANK_TRANSFER', 'MOBILE_MONEY', 'OTHER'].includes(p.method)) {
+      return res.status(400).json({ message: 'A historical payment has an invalid payment method' });
+    }
+
+    preparedPayments.push({
+      amount,
+      receivedAt,
+      method: p.method,
+      reference: String(p.reference || '').slice(0, 150)
+    });
+  }
+
+  // Build overdue assessment dates.
+  const firstOverdue = new Date(due);
+  firstOverdue.setDate(firstOverdue.getDate() + 1);
+
+  const events = [];
+  let slot = new Date(firstOverdue);
+  let slotCount = 0;
+
+  while (slot <= now) {
+    events.push({ type: 'CHARGE', date: new Date(slot) });
+    slotCount++;
+
+    if (slotCount > 240) {
+      return res.status(400).json({ message: 'Historical loan exceeds the supported overdue assessment period' });
+    }
+
+    slot = nextMonthlyAnniversary(firstOverdue, slotCount);
+  }
+
+  preparedPayments.forEach((payment, index) => {
+    events.push({
+      type: 'PAYMENT',
+      date: payment.receivedAt,
+      index
+    });
+  });
+
+  // Process events in date order. Assess charges before payments
+  // if both events have exactly the same timestamp.
+  events.sort((a, b) =>
+    a.date.getTime() - b.date.getTime() ||
+    (a.type === 'CHARGE' ? -1 : 1)
+  );
+
+  let chargesTotal = 0;
+  let paymentsTotal = 0;
+  let chargesPaid = 0;
+  let interestPaid = 0;
+  let principalPaid = 0;
+
+  const assessments = [];
+  const paymentRecords = [];
+
+  function currentBalance() {
+    return Math.max(0, amountDueAtStart + chargesTotal - paymentsTotal);
+  }
+
+  for (const event of events) {
+    if (event.type === 'CHARGE') {
+      const balance = currentBalance();
+
+      if (balance <= 0) continue;
+
+      const charge = Math.round(balance * 0.25);
+
+      if (charge > 0) {
+        chargesTotal += charge;
+        assessments.push({
+          date: event.date,
+          baseBalance: balance,
+          amount: charge
+        });
+      }
+
+      continue;
+    }
+
+    const payment = preparedPayments[event.index];
+    const balance = currentBalance();
+
+    if (balance <= 0) {
+      return res.status(400).json({
+        message: 'A historical payment occurs after the loan was already fully settled'
+      });
+    }
+
+    if (payment.amount > balance) {
+      return res.status(400).json({
+        message: `A historical payment exceeds the balance on ${payment.receivedAt.toISOString().slice(0, 10)}`
+      });
+    }
+
+    let remaining = payment.amount;
+
+    const allocatedCharges = Math.min(remaining, chargesTotal - chargesPaid);
+    remaining -= allocatedCharges;
+
+    const allocatedInterest = Math.min(remaining, interest - interestPaid);
+    remaining -= allocatedInterest;
+
+    const allocatedPrincipal = Math.min(remaining, principalThebe - principalPaid);
+    remaining -= allocatedPrincipal;
+
+    if (remaining > 0) {
+      return res.status(400).json({ message: 'Could not allocate a historical payment correctly' });
+    }
+
+    chargesPaid += allocatedCharges;
+    interestPaid += allocatedInterest;
+    principalPaid += allocatedPrincipal;
+    paymentsTotal += payment.amount;
+
+    paymentRecords.push({
+      ...payment,
+      allocatedCharges,
+      allocatedInterest,
+      allocatedPrincipal
+    });
+  }
+
+  // Create the historical loan with its final calculated balances.
+  let loan;
+
+  try {
+    loan = await Loan.create({
+      loanNumber: `HL-${Date.now()}`,
+      originalLoanNumber: String(originalLoanNumber).slice(0, 100),
+      isHistorical: true,
+      client: client._id,
+      principal: principalThebe,
+      interestRate: rate,
+      interest,
+      amountDueAtStart,
+      dueDate: due,
+      originalDisbursementDate: disbursement,
+      purpose: String(purpose).trim(),
+      submittedBy: req.user._id,
+      disbursedBy: req.user._id,
+      disbursedAt: disbursement,
+      status: currentBalance() === 0 ? 'SETTLED' : 'DISBURSED',
+      chargesTotal,
+      paymentsTotal,
+      chargesPaid,
+      interestPaid,
+      principalPaid,
+      settledAt: currentBalance() === 0 ? paymentRecords[paymentRecords.length - 1]?.receivedAt : null,
+      overdueAssessments: assessments.map(a => ({
+        periodKey: `${Date.now()}:${a.date.getFullYear()}-${String(a.date.getMonth() + 1).padStart(2, '0')}-${String(a.date.getDate()).padStart(2, '0')}`,
+        assessedAt: a.date,
+        baseBalance: a.baseBalance,
+        rate: 25,
+        amount: a.amount
+      })),
+      lastOverdueAssessmentAt: assessments.length
+        ? assessments[assessments.length - 1].date
+        : null
+    });
+
+    const paymentDocuments = paymentRecords.map(p => ({
+      receiptNumber: `RC-H-${Date.now()}-${Math.floor(Math.random() * 900000 + 100000)}`,
+      loan: loan._id,
+      client: client._id,
+      amount: p.amount,
+      allocatedCharges: p.allocatedCharges,
+      allocatedInterest: p.allocatedInterest,
+      allocatedPrincipal: p.allocatedPrincipal,
+      method: p.method,
+      reference: p.reference,
+      receivedBy: req.user._id,
+      receivedAt: p.receivedAt
+    }));
+
+    if (paymentDocuments.length) {
+      await Payment.insertMany(paymentDocuments);
+    }
+
+    await audit(req, 'HISTORICAL_LOAN_IMPORTED', 'Loan', loan._id, {
+      loanNumber: loan.loanNumber,
+      originalLoanNumber,
+      paymentsImported: paymentDocuments.length,
+      chargesBWP: fromThebe(chargesTotal),
+      outstandingBWP: fromThebe(currentBalance())
+    });
+
+    res.status(201).json(loanSummary(loan));
+
+  } catch (error) {
+    if (loan) {
+      await Payment.deleteMany({ loan: loan._id });
+      await Loan.deleteOne({ _id: loan._id });
+    }
+
+    throw error;
+  }
+});
+
 // Safe to run repeatedly: one charge per loan/periodKey.
 router.post('/assess-overdue', allowRoles('MANAGER','ADMIN'), async (req, res) => {
   const now = new Date();
