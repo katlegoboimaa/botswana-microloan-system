@@ -16,6 +16,9 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [clients, setClients] = useState([]);
   const [loans, setLoans] = useState([]);
+  const [selectedClient, setSelectedClient] = useState(null);
+  const [selectedLoan, setSelectedLoan] = useState(null);
+  const [profilePayments, setProfilePayments] = useState([]);
   const [deletionRequests, setDeletionRequests] = useState([]);
   const [summary, setSummary] = useState(null);
   const [staff, setStaff] = useState([]);
@@ -161,7 +164,49 @@ export default function App() {
   async function disburse(id) {
     if (!window.confirm('Confirm this approved loan has been disbursed to the client?')) return;
     await act(() => api(`/loans/${id}/disburse`, {method:'POST',body:JSON.stringify({})}), 'Disbursement recorded.');
-  }async function requestLoanDeletion(loan) {
+  } async function openClientProfile(client) {
+  setSelectedClient(client);
+  setSelectedLoan(null);
+  setProfilePayments([]);
+  setError('');
+  setTab('client-profile');
+
+  try {
+    const clientLoans = loans.filter(
+      loan => loan.client?._id === client._id
+    );
+
+    const paymentResults = await Promise.all(
+      clientLoans.map(loan =>
+        api(`/loans/${loan._id}/payments`)
+      )
+    );
+
+    setProfilePayments(
+      paymentResults.flat().sort(
+        (a, b) => new Date(b.receivedAt) - new Date(a.receivedAt)
+      )
+    );
+  } catch (e) {
+    setError(e.message);
+  }
+}
+
+async function openLoanProfile(loan) {
+  setSelectedLoan(loan);
+  setSelectedClient(null);
+  setProfilePayments([]);
+  setError('');
+  setTab('loan-profile');
+
+  try {
+    const payments = await api(`/loans/${loan._id}/payments`);
+    setProfilePayments(payments);
+  } catch (e) {
+    setError(e.message);
+  }
+}
+  async function requestLoanDeletion(loan) {
   const reason = window.prompt(
     `Why should loan ${loan.loanNumber} be deleted?`
   );
@@ -285,10 +330,150 @@ async function reviewDeletionRequest(requestId, decision) {
       {error && <div className="alert error">{error}<button className="alert-close" onClick={()=>setError('')}>×</button></div>}{notice && <div className="alert success">{notice}<button className="alert-close" onClick={()=>setNotice('')}>×</button></div>}
       {tab==='overview' && <Overview user={user} summary={summary} loans={loans} clients={clients} setTab={setTab} assess={assess}/>}
       {tab==='clients' && <section className="panel"><div className="section-head"><div><h3>Client register</h3><p>Client profile editing is restricted to the IT administrator.</p></div><span className="count">{clients.length} clients</span></div><input className="search" placeholder="Search name, client number, phone or ID…" value={search} onChange={e=>setSearch(e.target.value)}/>{canCapture || user.role==='ADMIN' ? <form className="form-grid" onSubmit={createClient}><h4 className="full">Register a new client</h4><Field label="First name" value={clientForm.firstName} set={v=>setClientForm({...clientForm,firstName:v})} required/><Field label="Last name" value={clientForm.lastName} set={v=>setClientForm({...clientForm,lastName:v})} required/><Field label="National ID / Omang" value={clientForm.nationalId} set={v=>setClientForm({...clientForm,nationalId:v})} required/><Field label="Phone" value={clientForm.phone} set={v=>setClientForm({...clientForm,phone:v})} required/><Field label="Email (optional)" type="email" value={clientForm.email} set={v=>setClientForm({...clientForm,email:v})}/><Field label="Address / village" value={clientForm.address} set={v=>setClientForm({...clientForm,address:v})} required/><Field label="Employment (optional)" value={clientForm.employment} set={v=>setClientForm({...clientForm,employment:v})}/><label className="full">Notes<textarea value={clientForm.notes} onChange={e=>setClientForm({...clientForm,notes:e.target.value})}/></label><div className="full"><button className="primary">Save client</button></div></form>:null}
-        <div className="table-wrap"><table><thead><tr><th>Client</th><th>Client no.</th><th>Phone</th><th>National ID</th><th>Address</th>{canStaff&&<th>Action</th>}</tr></thead><tbody>{filteredClients.map(c=><tr key={c._id}><td><b>{c.firstName} {c.lastName}</b><small className="table-sub">{c.email||'No email'}</small></td><td>{c.clientNumber}</td><td>{c.phone}</td><td>{c.nationalId}</td><td>{c.address}</td>{canStaff&&<td><button className="text-button" onClick={()=>setClientEdit({...c})}>Edit profile</button></td>}</tr>)}</tbody></table>{filteredClients.length===0&&<Empty text="No clients found."/>}</div>
+        <div className="table-wrap"><table><thead><tr><th>Client</th><th>Client no.</th><th>Phone</th><th>National ID</th><th>Address</th>{canStaff&&<th>Action</th>}</tr></thead><tbody>{filteredClients.map(c=><tr key={c._id}><td>
+  <button
+    className="text-button profile-link"
+    onClick={() => openClientProfile(c)}
+  >
+    <b>{c.firstName} {c.lastName}</b>
+  </button>
+  <small className="table-sub">{c.email || 'No email'}</small>
+</td><td>{c.clientNumber}</td><td>{c.phone}</td><td>{c.nationalId}</td><td>{c.address}</td>{canStaff&&<td><button className="text-button" onClick={()=>setClientEdit({...c})}>Edit profile</button></td>}</tr>)}</tbody></table>{filteredClients.length===0&&<Empty text="No clients found."/>}</div>
       </section>}
+      {tab === 'client-profile' && selectedClient && (() => {
+  const clientLoans = loans.filter(
+    l => l.client?._id === selectedClient._id
+  );
+
+  const totalBorrowed = clientLoans.reduce(
+    (sum, l) => sum + (Number(l.principalBWP) || 0),
+    0
+  );
+
+  const totalPaid = clientLoans
+    .filter(l => l.status !== 'VOIDED')
+    .reduce(
+      (sum, l) => sum + (Number(l.paymentsTotalBWP) || 0),
+      0
+    );
+
+  const totalOutstanding = clientLoans
+    .filter(l => !['VOIDED', 'REJECTED'].includes(l.status))
+    .reduce(
+      (sum, l) => sum + (Number(l.outstandingBWP) || 0),
+      0
+    );
+
+  return (
+    <section className="panel">
+      <div className="section-head">
+        <div>
+          <button className="text-button" onClick={() => setTab('clients')}>
+            ← Back to clients
+          </button>
+          <h3>
+            {selectedClient.firstName} {selectedClient.lastName}
+          </h3>
+          <p>Client profile · {selectedClient.clientNumber}</p>
+        </div>
+        <span className="count">{clientLoans.length} loans</span>
+      </div>
+
+      <div className="stats-grid">
+        <Stat label="Total borrowed" value={money(totalBorrowed)} />
+        <Stat label="Total repaid" value={money(totalPaid)} />
+        <Stat label="Outstanding" value={money(totalOutstanding)} />
+        <Stat label="Loan accounts" value={clientLoans.length} />
+      </div>
+
+      <h4>Personal information</h4>
+      <div className="profile-grid">
+        <div><small>Full name</small><b>{selectedClient.firstName} {selectedClient.lastName}</b></div>
+        <div><small>National ID / Omang</small><b>{selectedClient.nationalId || '—'}</b></div>
+        <div><small>Phone</small><b>{selectedClient.phone || '—'}</b></div>
+        <div><small>Email</small><b>{selectedClient.email || '—'}</b></div>
+        <div><small>Address / Village</small><b>{selectedClient.address || '—'}</b></div>
+        <div><small>Employment</small><b>{selectedClient.employment || '—'}</b></div>
+        <div className="full"><small>Notes</small><b>{selectedClient.notes || '—'}</b></div>
+      </div>
+
+      <h4>Loan history</h4>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Loan number</th>
+              <th>Status</th>
+              <th>Principal</th>
+              <th>Paid</th>
+              <th>Outstanding</th>
+              <th>Due date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {clientLoans.map(l => (
+              <tr key={l._id}>
+                <td>
+                  <button
+                    className="text-button profile-link"
+                    onClick={() => openLoanProfile(l)}
+                  >
+                    {l.loanNumber}
+                  </button>
+                </td>
+                <td><Status value={l.status} /></td>
+                <td>{money(l.principalBWP)}</td>
+                <td>{money(l.paymentsTotalBWP)}</td>
+                <td>{money(l.outstandingBWP)}</td>
+                <td>{new Date(l.dueDate).toLocaleDateString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {clientLoans.length === 0 && <Empty text="No loans for this client." />}
+      </div>
+
+      <h4>Repayment history</h4>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Receipt number</th>
+              <th>Loan</th>
+              <th>Amount</th>
+              <th>Method</th>
+              <th>Date received</th>
+            </tr>
+          </thead>
+          <tbody>
+            {profilePayments.map(p => (
+              <tr key={p._id}>
+                <td>{p.receiptNumber}</td>
+                <td>{clientLoans.find(l => l._id === p.loan)?.loanNumber || '—'}</td>
+                <td>{money(p.amount / 100)}</td>
+                <td>{p.method}</td>
+                <td>{new Date(p.receivedAt).toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {profilePayments.length === 0 && <Empty text="No repayments recorded." />}
+      </div>
+    </section>
+  );
+})()}
       {tab==='loans' && <section className="panel"><div className="section-head"><div><h3>Loan applications & accounts</h3><p>Applications require manager approval before disbursement.</p></div><span className="count">{loans.length} records</span></div><input className="search" placeholder="Search loan number, client or status…" value={search} onChange={e=>setSearch(e.target.value)}/>{canCapture&&<form className="form-grid" onSubmit={createLoan}><h4 className="full">New loan application</h4><label>Client<select value={loanForm.clientId} onChange={e=>setLoanForm({...loanForm,clientId:e.target.value})} required><option value="">Choose a client</option>{clients.map(c=><option key={c._id} value={c._id}>{c.clientNumber} — {c.firstName} {c.lastName}</option>)}</select></label><Field label="Principal (BWP)" type="number" min="1" step="0.01" value={loanForm.principal} set={v=>setLoanForm({...loanForm,principal:v})} required/><Field label="Initial flat interest (%)" type="number" min="0" max="100" step="0.1" value={loanForm.interestRate} set={v=>setLoanForm({...loanForm,interestRate:v})} required/><Field label="Due date" type="date" value={loanForm.dueDate} set={v=>setLoanForm({...loanForm,dueDate:v})} required/><label>Purpose<input value={loanForm.purpose} onChange={e=>setLoanForm({...loanForm,purpose:e.target.value})} required/></label><div className="form-note full">Initial interest is a flat percentage of principal. A 25% rate on BWP 1,000 adds BWP 250 initial interest.</div><div className="full"><button className="primary">Submit application</button></div></form>}
-        <div className="table-wrap"><table><thead><tr><th>Loan / client</th><th>Status</th><th>Principal</th><th>Initial interest</th><th>Charges</th><th>Paid</th><th>Outstanding</th><th>Due date</th><th>Actions</th></tr></thead><tbody>{filteredLoans.map(l=><tr key={l._id}><td><b>{l.loanNumber}</b><small className="table-sub">{l.client?.firstName} {l.client?.lastName}</small></td><td><Status value={l.status}/></td><td>{money(l.principalBWP)}</td><td>{money(l.interestBWP)}</td><td>{money(l.chargesTotalBWP)}</td><td>{money(l.paymentsTotalBWP)}</td><td><b>{money(l.outstandingBWP)}</b></td><td>{new Date(l.dueDate).toLocaleDateString()}</td><td className="actions">{user.role === 'ADMIN' && l.status !== 'VOIDED' && (
+        <div className="table-wrap"><table><thead><tr><th>Loan / client</th><th>Status</th><th>Principal</th><th>Initial interest</th><th>Charges</th><th>Paid</th><th>Outstanding</th><th>Due date</th><th>Actions</th></tr></thead><tbody>{filteredLoans.map(l=><tr key={l._id}><td>
+  <button
+    className="text-button profile-link"
+    onClick={() => openLoanProfile(l)}
+  >
+    <b>{l.loanNumber}</b>
+  </button>
+  <small className="table-sub">
+    {l.client?.firstName} {l.client?.lastName}
+  </small>
+</td><td><Status value={l.status}/></td><td>{money(l.principalBWP)}</td><td>{money(l.interestBWP)}</td><td>{money(l.chargesTotalBWP)}</td><td>{money(l.paymentsTotalBWP)}</td><td><b>{money(l.outstandingBWP)}</b></td><td>{new Date(l.dueDate).toLocaleDateString()}</td><td className="actions">{user.role === 'ADMIN' && l.status !== 'VOIDED' && (
   <button
     className="mini danger-btn"
     onClick={() => requestLoanDeletion(l)}
@@ -383,7 +568,159 @@ async function reviewDeletionRequest(requestId, decision) {
       )}
     </div>
   </section>
-)}
+  )}
+  {tab === 'loan-profile' && selectedLoan && (
+  <section className="panel">
+    <div className="section-head">
+      <div>
+        <button
+          className="text-button"
+          onClick={() => {
+            setSelectedLoan(null);
+            setTab('loans');
+          }}
+        >
+          ← Back to loans
+        </button>
+
+        <h3>Loan {selectedLoan.loanNumber}</h3>
+
+        <p>
+          Client: {selectedLoan.client?.firstName} {selectedLoan.client?.lastName}
+        </p>
+      </div>
+
+      <Status value={selectedLoan.status} />
+    </div>
+
+    <div className="stats-grid">
+      <Stat label="Principal" value={money(selectedLoan.principalBWP)} />
+      <Stat label="Initial interest" value={money(selectedLoan.interestBWP)} />
+      <Stat label="Overdue charges" value={money(selectedLoan.chargesTotalBWP)} />
+      <Stat label="Total paid" value={money(selectedLoan.paymentsTotalBWP)} />
+      <Stat label="Outstanding" value={money(selectedLoan.outstandingBWP)} />
+    </div>
+
+    <h4>Loan information</h4>
+
+    <div className="profile-grid">
+      <div>
+        <small>Loan number</small>
+        <b>{selectedLoan.loanNumber}</b>
+      </div>
+
+      <div>
+        <small>Client</small>
+        <b>{selectedLoan.client?.firstName} {selectedLoan.client?.lastName}</b>
+      </div>
+
+      <div>
+        <small>Interest rate</small>
+        <b>{selectedLoan.interestRate}%</b>
+      </div>
+
+      <div>
+        <small>Purpose</small>
+        <b>{selectedLoan.purpose || '—'}</b>
+      </div>
+
+      <div>
+        <small>Due date</small>
+        <b>{new Date(selectedLoan.dueDate).toLocaleDateString()}</b>
+      </div>
+
+      <div>
+        <small>Disbursement date</small>
+        <b>
+          {selectedLoan.disbursedAt
+            ? new Date(selectedLoan.disbursedAt).toLocaleDateString()
+            : selectedLoan.originalDisbursementDate
+              ? new Date(selectedLoan.originalDisbursementDate).toLocaleDateString()
+              : '—'}
+        </b>
+      </div>
+
+      <div>
+        <small>Historical loan</small>
+        <b>{selectedLoan.isHistorical ? 'Yes' : 'No'}</b>
+      </div>
+
+      {selectedLoan.originalLoanNumber && (
+        <div>
+          <small>Original loan number</small>
+          <b>{selectedLoan.originalLoanNumber}</b>
+        </div>
+      )}
+    </div>
+
+    <h4>Repayment allocation summary</h4>
+
+    <div className="profile-grid">
+      <div>
+        <small>Principal paid</small>
+        <b>{money(selectedLoan.principalPaidBWP)}</b>
+      </div>
+
+      <div>
+        <small>Interest paid</small>
+        <b>{money(selectedLoan.interestPaidBWP)}</b>
+      </div>
+
+      <div>
+        <small>Charges paid</small>
+        <b>{money(selectedLoan.chargesPaidBWP)}</b>
+      </div>
+    </div>
+
+    <h4>Repayment history</h4>
+
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Receipt number</th>
+            <th>Amount</th>
+            <th>Charges</th>
+            <th>Interest</th>
+            <th>Principal</th>
+            <th>Method</th>
+            <th>Reference</th>
+            <th>Date received</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {profilePayments.map(p => (
+            <tr key={p._id}>
+              <td>{p.receiptNumber}</td>
+              <td>{money(p.amount / 100)}</td>
+              <td>{money((p.allocatedCharges || 0) / 100)}</td>
+              <td>{money((p.allocatedInterest || 0) / 100)}</td>
+              <td>{money((p.allocatedPrincipal || 0) / 100)}</td>
+              <td>{p.method}</td>
+              <td>{p.reference || '—'}</td>
+              <td>{new Date(p.receivedAt).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {profilePayments.length === 0 && (
+        <Empty text="No repayments recorded for this loan." />
+      )}
+    </div>
+
+    {selectedLoan.status === 'VOIDED' && (
+      <div className="alert error">
+        This loan has been voided. Its repayment history is preserved.
+        {selectedLoan.voidReason && (
+          <p>Reason: {selectedLoan.voidReason}</p>
+        )}
+      </div>
+    )}
+  </section>
+  )}
+
 
       
 {tab === 'historical' && canHistorical && (
