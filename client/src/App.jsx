@@ -16,6 +16,7 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [clients, setClients] = useState([]);
   const [loans, setLoans] = useState([]);
+  const [deletionRequests, setDeletionRequests] = useState([]);
   const [summary, setSummary] = useState(null);
   const [staff, setStaff] = useState([]);
   const [audit, setAudit] = useState([]);
@@ -43,12 +44,16 @@ export default function App() {
   const canAudit = ['ADMIN','MANAGEMENT'].includes(user?.role);
   const canCapture = ['CLERK','MANAGER'].includes(user?.role);
   const canHistorical = ['MANAGER', 'ADMIN'].includes(user?.role);
+  const canViewDeletionRequests = ['ADMIN', 'MANAGER'].includes(user?.role);
 
   async function loadAll() {
     setError('');
     try {
       const [c,l] = await Promise.all([api('/clients'), api('/loans')]);
       setClients(c); setLoans(l);
+      if (['ADMIN', 'MANAGER'].includes(user?.role)) {
+  setDeletionRequests(await api('/loans/deletion-requests'));
+}
       if (canReports || ['MANAGER','ADMIN','MANAGEMENT'].includes(user?.role)) setSummary(await api('/reports/summary'));
       if (user?.role === 'ADMIN') setStaff(await api('/staff'));
       if (['ADMIN','MANAGEMENT'].includes(user?.role)) setAudit(await api('/reports/audit'));
@@ -156,7 +161,53 @@ export default function App() {
   async function disburse(id) {
     if (!window.confirm('Confirm this approved loan has been disbursed to the client?')) return;
     await act(() => api(`/loans/${id}/disburse`, {method:'POST',body:JSON.stringify({})}), 'Disbursement recorded.');
+  }async function requestLoanDeletion(loan) {
+  const reason = window.prompt(
+    `Why should loan ${loan.loanNumber} be deleted?`
+  );
+
+  if (!reason || !reason.trim()) return;
+
+  if (!window.confirm(
+    `Submit a deletion request for ${loan.loanNumber}? A Manager must approve it.`
+  )) return;
+
+  await act(
+    () => api(`/loans/${loan._id}/deletion-request`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: reason.trim() })
+    }),
+    'Deletion request submitted for Manager review.'
+  );
+}
+
+async function reviewDeletionRequest(requestId, decision) {
+  const action = decision === 'APPROVE' ? 'approve' : 'reject';
+
+  if (decision === 'APPROVE') {
+    const confirmed = window.confirm(
+      'Are you sure you want to approve this deletion? A loan with repayments will be voided; a loan without repayments will be permanently deleted.'
+    );
+
+    if (!confirmed) return;
   }
+
+  const reviewNote = window.prompt(
+    `Optional note explaining why you ${action} this request:`
+  );
+
+  if (reviewNote === null) return;
+
+  await act(
+    () => api(`/loans/deletion-requests/${requestId}/review`, {
+      method: 'POST',
+      body: JSON.stringify({ decision, reviewNote })
+    }),
+    decision === 'APPROVE'
+      ? 'Deletion request approved and processed.'
+      : 'Deletion request rejected.'
+  );
+}
   async function repayment(e) {
     e.preventDefault();
     await act(async () => {
@@ -200,6 +251,14 @@ export default function App() {
         <Nav active={tab==='overview'} onClick={()=>setTab('overview')}>Overview</Nav>
         <Nav active={tab==='clients'} onClick={()=>setTab('clients')}>Clients</Nav>
         <Nav active={tab==='loans'} onClick={()=>setTab('loans')}>Loans</Nav>
+        {canViewDeletionRequests && (
+  <Nav
+    active={tab === 'deletions'}
+    onClick={() => setTab('deletions')}
+  >
+    Deletion requests
+  </Nav>
+)}
         {canHistorical && (
   <Nav active={tab==='historical'} onClick={()=>setTab('historical')}>
     Historical loans
@@ -216,6 +275,7 @@ export default function App() {
   overview: 'Overview',
   clients: 'Clients',
   loans: 'Loan management',
+  deletions: 'Loan deletion requests',
   historical: 'Historical loan entry',
   repayments: 'Record repayment',
   reports: 'Reports & performance',
@@ -228,8 +288,103 @@ export default function App() {
         <div className="table-wrap"><table><thead><tr><th>Client</th><th>Client no.</th><th>Phone</th><th>National ID</th><th>Address</th>{canStaff&&<th>Action</th>}</tr></thead><tbody>{filteredClients.map(c=><tr key={c._id}><td><b>{c.firstName} {c.lastName}</b><small className="table-sub">{c.email||'No email'}</small></td><td>{c.clientNumber}</td><td>{c.phone}</td><td>{c.nationalId}</td><td>{c.address}</td>{canStaff&&<td><button className="text-button" onClick={()=>setClientEdit({...c})}>Edit profile</button></td>}</tr>)}</tbody></table>{filteredClients.length===0&&<Empty text="No clients found."/>}</div>
       </section>}
       {tab==='loans' && <section className="panel"><div className="section-head"><div><h3>Loan applications & accounts</h3><p>Applications require manager approval before disbursement.</p></div><span className="count">{loans.length} records</span></div><input className="search" placeholder="Search loan number, client or status…" value={search} onChange={e=>setSearch(e.target.value)}/>{canCapture&&<form className="form-grid" onSubmit={createLoan}><h4 className="full">New loan application</h4><label>Client<select value={loanForm.clientId} onChange={e=>setLoanForm({...loanForm,clientId:e.target.value})} required><option value="">Choose a client</option>{clients.map(c=><option key={c._id} value={c._id}>{c.clientNumber} — {c.firstName} {c.lastName}</option>)}</select></label><Field label="Principal (BWP)" type="number" min="1" step="0.01" value={loanForm.principal} set={v=>setLoanForm({...loanForm,principal:v})} required/><Field label="Initial flat interest (%)" type="number" min="0" max="100" step="0.1" value={loanForm.interestRate} set={v=>setLoanForm({...loanForm,interestRate:v})} required/><Field label="Due date" type="date" value={loanForm.dueDate} set={v=>setLoanForm({...loanForm,dueDate:v})} required/><label>Purpose<input value={loanForm.purpose} onChange={e=>setLoanForm({...loanForm,purpose:e.target.value})} required/></label><div className="form-note full">Initial interest is a flat percentage of principal. A 25% rate on BWP 1,000 adds BWP 250 initial interest.</div><div className="full"><button className="primary">Submit application</button></div></form>}
-        <div className="table-wrap"><table><thead><tr><th>Loan / client</th><th>Status</th><th>Principal</th><th>Initial interest</th><th>Charges</th><th>Paid</th><th>Outstanding</th><th>Due date</th><th>Actions</th></tr></thead><tbody>{filteredLoans.map(l=><tr key={l._id}><td><b>{l.loanNumber}</b><small className="table-sub">{l.client?.firstName} {l.client?.lastName}</small></td><td><Status value={l.status}/></td><td>{money(l.principalBWP)}</td><td>{money(l.interestBWP)}</td><td>{money(l.chargesTotalBWP)}</td><td>{money(l.paymentsTotalBWP)}</td><td><b>{money(l.outstandingBWP)}</b></td><td>{new Date(l.dueDate).toLocaleDateString()}</td><td className="actions">{canDecide&&l.status==='PENDING'&&<><button className="mini success-btn" onClick={()=>decision(l._id,'APPROVED')}>Approve</button><button className="mini danger-btn" onClick={()=>decision(l._id,'REJECTED')}>Reject</button></>}{canDecide&&l.status==='APPROVED'&&<button className="mini primary" onClick={()=>disburse(l._id)}>Disburse</button>}{canCapture&&l.status==='DISBURSED'&&<button className="mini secondary" onClick={()=>{setRepayForm({...repayForm,loanId:l._id});setTab('repayments')}}>Repay</button>}</td></tr>)}</tbody></table>{filteredLoans.length===0&&<Empty text="No loans match your search."/>}</div>
-      </section>}
+        <div className="table-wrap"><table><thead><tr><th>Loan / client</th><th>Status</th><th>Principal</th><th>Initial interest</th><th>Charges</th><th>Paid</th><th>Outstanding</th><th>Due date</th><th>Actions</th></tr></thead><tbody>{filteredLoans.map(l=><tr key={l._id}><td><b>{l.loanNumber}</b><small className="table-sub">{l.client?.firstName} {l.client?.lastName}</small></td><td><Status value={l.status}/></td><td>{money(l.principalBWP)}</td><td>{money(l.interestBWP)}</td><td>{money(l.chargesTotalBWP)}</td><td>{money(l.paymentsTotalBWP)}</td><td><b>{money(l.outstandingBWP)}</b></td><td>{new Date(l.dueDate).toLocaleDateString()}</td><td className="actions">{user.role === 'ADMIN' && l.status !== 'VOIDED' && (
+  <button
+    className="mini danger-btn"
+    onClick={() => requestLoanDeletion(l)}
+  >
+    Request deletion
+  </button>
+)}{canDecide&&l.status==='PENDING'&&<><button className="mini success-btn" onClick={()=>decision(l._id,'APPROVED')}>Approve</button><button className="mini danger-btn" onClick={()=>decision(l._id,'REJECTED')}>Reject</button></>}{canDecide&&l.status==='APPROVED'&&<button className="mini primary" onClick={()=>disburse(l._id)}>Disburse</button>}{canCapture&&l.status==='DISBURSED'&&<button className="mini secondary" onClick={()=>{setRepayForm({...repayForm,loanId:l._id});setTab('repayments')}}>Repay</button>}</td></tr>)}</tbody></table>{filteredLoans.length===0&&<Empty text="No loans match your search."/>}</div>
+      </section>}   
+{tab === 'deletions' && canViewDeletionRequests && (
+  <section className="panel">
+    <div className="section-head">
+      <div>
+        <h3>Loan deletion requests</h3>
+        <p>
+          ADMIN submits requests. MANAGER reviews and makes the final decision.
+        </p>
+      </div>
+      <span className="count">
+        {deletionRequests.filter(r => r.status === 'PENDING').length} pending
+      </span>
+    </div>
+
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Loan number</th>
+            <th>Requested by</th>
+            <th>Reason</th>
+            <th>Date requested</th>
+            <th>Status</th>
+            <th>Manager note</th>
+            {canDecide && <th>Actions</th>}
+          </tr>
+        </thead>
+
+        <tbody>
+          {deletionRequests.map(request => (
+            <tr key={request._id}>
+              <td>
+                <b>
+                  {request.loan?.loanNumber || request.loanNumber}
+                </b>
+              </td>
+
+              <td>{request.requestedByName}</td>
+
+              <td>{request.reason}</td>
+
+              <td>
+                {new Date(request.createdAt).toLocaleString()}
+              </td>
+
+              <td>
+                <Status value={request.status} />
+              </td>
+
+              <td>{request.reviewNote || '—'}</td>
+
+              {canDecide && (
+                <td className="actions">
+                  {request.status === 'PENDING' && (
+                    <>
+                      <button
+                        className="mini success-btn"
+                        onClick={() =>
+                          reviewDeletionRequest(request._id, 'APPROVE')
+                        }
+                      >
+                        Approve
+                      </button>
+
+                      <button
+                        className="mini danger-btn"
+                        onClick={() =>
+                          reviewDeletionRequest(request._id, 'REJECT')
+                        }
+                      >
+                        Reject
+                      </button>
+                    </>
+                  )}
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {deletionRequests.length === 0 && (
+        <Empty text="No deletion requests have been submitted." />
+      )}
+    </div>
+  </section>
+)}
+
       
 {tab === 'historical' && canHistorical && (
   <section className="panel">

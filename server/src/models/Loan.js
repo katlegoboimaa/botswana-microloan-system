@@ -11,7 +11,14 @@ const loanSchema = new mongoose.Schema({
   isHistorical: { type: Boolean, default: false },
   originalLoanNumber: { type: String, default: '' },
   purpose: { type: String, required: true },
-  status: { type: String, enum: ['PENDING','APPROVED','REJECTED','DISBURSED','SETTLED'], default: 'PENDING' },
+  status: {
+  type: String,
+  enum: ['PENDING', 'APPROVED', 'REJECTED', 'DISBURSED', 'SETTLED', 'VOIDED'],
+  default: 'PENDING'
+   },
+  voidedAt: { type: Date, default: null },
+  voidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  voidReason: { type: String, default: '' },
   decisionNote: { type: String, default: '' },
   submittedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   decidedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },

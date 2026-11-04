@@ -2,6 +2,8 @@ import { Router } from 'express';
 import Loan from '../models/Loan.js';
 import Client from '../models/Client.js';
 import Payment from '../models/Payment.js';
+import LoanDeletionRequest from '../models/LoanDeletionRequest.js';
+import AuditLog from '../models/AuditLog.js';
 import { authenticate, allowRoles } from '../middleware/auth.js';
 import { audit } from '../middleware/audit.js';
 import { toThebe, fromThebe } from '../utils/money.js';
@@ -435,5 +437,243 @@ function nextMonthlyAnniversary(first, monthOffset) {
   target.setDate(Math.min(originalDay, lastDay));
   return target;
 }
+
+/* =========================================
+   LOAN DELETION REQUEST WORKFLOW
+========================================= */
+
+// ADMIN submits a deletion request
+router.post(
+  '/:id/deletion-request',
+  allowRoles('ADMIN'),
+  async (req, res) => {
+    const session = await Loan.startSession();
+
+    try {
+      const reason = String(req.body.reason || '').trim();
+
+      if (!reason) {
+        return res.status(400).json({ message: 'A deletion reason is required.' });
+      }
+
+      const loan = await Loan.findById(req.params.id);
+
+      if (!loan) {
+        return res.status(404).json({ message: 'Loan not found.' });
+      }
+
+      if (loan.status === 'VOIDED') {
+        return res.status(400).json({ message: 'This loan has already been voided.' });
+      }
+
+      const existingRequest = await LoanDeletionRequest.findOne({
+        loan: loan._id,
+        status: 'PENDING'
+      });
+
+      if (existingRequest) {
+        return res.status(409).json({
+          message: 'A pending deletion request already exists for this loan.'
+        });
+      }
+
+      let createdRequest;
+
+      await session.withTransaction(async () => {
+        const [request] = await LoanDeletionRequest.create([{
+          loan: loan._id,
+          loanNumber: loan.loanNumber,
+          requestedBy: req.user._id,
+          requestedByName: req.user.name,
+          reason
+        }], { session });
+
+        await AuditLog.create([{
+          actor: req.user._id,
+          actorName: req.user.name || 'System',
+          actorRole: req.user.role,
+          action: 'LOAN_DELETION_REQUESTED',
+          entityType: 'Loan',
+          entityId: loan._id.toString(),
+          details: {
+            loanNumber: loan.loanNumber,
+            reason
+          },
+          ip: req.ip,
+          userAgent: req.get('user-agent') || ''
+        }], { session });
+
+        createdRequest = request;
+      });
+
+      res.status(201).json({
+        message: 'Deletion request submitted successfully. A Manager must review it.',
+        request: createdRequest
+      });
+
+    } catch (err) {
+      console.error('LOAN DELETION REQUEST ERROR:', err);
+      res.status(500).json({ message: 'Could not submit deletion request.' });
+    } finally {
+      await session.endSession();
+    }
+  }
+);
+
+
+// ADMIN and MANAGER can view deletion requests
+router.get(
+  '/deletion-requests',
+  allowRoles('ADMIN', 'MANAGER'),
+  async (req, res) => {
+    try {
+      const requests = await LoanDeletionRequest.find({})
+        .populate('loan')
+        .sort({ createdAt: -1 });
+
+      res.json(requests);
+
+    } catch (err) {
+      console.error('FETCH DELETION REQUESTS ERROR:', err);
+      res.status(500).json({ message: 'Could not retrieve deletion requests.' });
+    }
+  }
+);
+
+
+// MANAGER approves or rejects a deletion request
+router.post(
+  '/deletion-requests/:requestId/review',
+  allowRoles('MANAGER'),
+  async (req, res) => {
+    const session = await Loan.startSession();
+
+    try {
+      const decision = String(req.body.decision || '').toUpperCase();
+      const reviewNote = String(req.body.reviewNote || '').trim();
+
+      if (!['APPROVE', 'REJECT'].includes(decision)) {
+        return res.status(400).json({
+          message: 'Decision must be APPROVE or REJECT.'
+        });
+      }
+
+      let result;
+
+      await session.withTransaction(async () => {
+        const request = await LoanDeletionRequest.findById(
+          req.params.requestId
+        ).session(session);
+
+        if (!request) {
+          const error = new Error('Deletion request not found.');
+          error.status = 404;
+          throw error;
+        }
+
+        if (request.status !== 'PENDING') {
+          const error = new Error('This request has already been reviewed.');
+          error.status = 409;
+          throw error;
+        }
+
+        if (request.requestedBy.toString() === req.user._id.toString()) {
+          const error = new Error('You cannot approve your own deletion request.');
+          error.status = 403;
+          throw error;
+        }
+
+        const loan = await Loan.findById(request.loan).session(session);
+
+        if (!loan) {
+          const error = new Error('The loan no longer exists.');
+          error.status = 404;
+          throw error;
+        }
+
+        let executionResult = 'REQUEST_REJECTED';
+
+        if (decision === 'APPROVE') {
+          const hasPayments = await Payment.exists({
+            loan: loan._id
+          }).session(session);
+
+          if (hasPayments) {
+            loan.status = 'VOIDED';
+            loan.voidedAt = new Date();
+            loan.voidedBy = req.user._id;
+            loan.voidReason = request.reason;
+
+            await loan.save({ session });
+
+            executionResult = 'LOAN_VOIDED';
+          } else {
+            await Loan.deleteOne(
+              { _id: loan._id },
+              { session }
+            );
+
+            executionResult = 'LOAN_PERMANENTLY_DELETED';
+          }
+        }
+
+        request.status = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+        request.reviewedBy = req.user._id;
+        request.reviewedByName = req.user.name;
+        request.reviewNote = reviewNote;
+        request.reviewedAt = new Date();
+
+        if (decision === 'APPROVE') {
+          request.executedAt = new Date();
+        }
+
+        await request.save({ session });
+
+        await AuditLog.create([{
+          actor: req.user._id,
+          actorName: req.user.name || 'System',
+          actorRole: req.user.role,
+          action: decision === 'APPROVE'
+            ? 'LOAN_DELETION_APPROVED'
+            : 'LOAN_DELETION_REJECTED',
+          entityType: 'Loan',
+          entityId: loan._id.toString(),
+          details: {
+            loanNumber: request.loanNumber,
+            requestId: request._id.toString(),
+            reviewNote,
+            executionResult
+          },
+          ip: req.ip,
+          userAgent: req.get('user-agent') || ''
+        }], { session });
+
+        result = {
+          message: decision === 'REJECT'
+            ? 'Deletion request rejected.'
+            : executionResult === 'LOAN_VOIDED'
+              ? 'Loan voided successfully. Repayment history has been preserved.'
+              : 'Loan permanently deleted successfully.',
+          executionResult,
+          requestId: request._id
+        };
+      });
+
+      res.json(result);
+
+    } catch (err) {
+      console.error('LOAN DELETION REVIEW ERROR:', err);
+
+      res.status(err.status || 500).json({
+        message: err.status
+          ? err.message
+          : 'Could not process the deletion request.'
+      });
+
+    } finally {
+      await session.endSession();
+    }
+  }
+);
 
 export default router;
